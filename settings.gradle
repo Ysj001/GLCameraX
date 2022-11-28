@@ -1,0 +1,3 @@
+rootProject.name = "LibCamera"
+include ':app'
+include ':lib_camera'
