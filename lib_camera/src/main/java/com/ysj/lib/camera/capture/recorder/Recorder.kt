@@ -97,14 +97,15 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         when (state) {
             State.INITIALIZING,
             State.INITIALIZED,
-            State.PENDING_START -> reset()
+            State.PENDING_START -> Unit
             State.STARTED,
             State.PAUSED -> {
-                stop()
-                reset()
+                stopInternal()
             }
         }
         this.executor = null
+        this.request = null
+        this.state = State.INITIALIZING
     }
 
     @SuppressLint("MissingPermission")
@@ -112,16 +113,20 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
     override fun onSurfaceRequest(request: VideoOutput.SurfaceRequest) {
         when (this.state) {
             State.INITIALIZING,
-            State.INITIALIZED -> initializeInternal(request)
+            State.INITIALIZED -> {
+                this.request = request
+                this.state = State.INITIALIZED
+            }
             State.PENDING_START -> {
-                initializeInternal(request)
+                this.request = request
+                this.state = State.INITIALIZED
                 setupAndStartEncoder()
             }
             State.STARTED,
             State.PAUSED -> {
                 stopInternal()
-                reset()
-                initializeInternal(request)
+                this.request = request
+                this.state = State.INITIALIZED
             }
         }
     }
@@ -139,14 +144,7 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
     internal fun start() {
         when (this.state) {
             State.INITIALIZING -> this.state = State.PENDING_START
-            State.INITIALIZED -> checkedExecute {
-                if (this.surface == null) {
-                    initializeInternal(checkNotNull(this.request))
-                    setupAndStartEncoder()
-                } else {
-                    setupAndStartEncoder()
-                }
-            }
+            State.INITIALIZED -> checkedExecute(::setupAndStartEncoder)
             else -> throw IllegalStateException("state error: ${this.state}")
         }
     }
@@ -158,7 +156,10 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
             State.INITIALIZED -> Unit
             State.PENDING_START -> this.state = State.INITIALIZING
             State.STARTED,
-            State.PAUSED -> checkedExecute(::stopInternal)
+            State.PAUSED -> {
+                checkedExecute(::stopInternal)
+                this.state = State.INITIALIZED
+            }
         }
     }
 
@@ -185,7 +186,6 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         synchronized(this) {
             recording = checkNotNull(this.recording) { "not prepare !" }
             this.recording = null
-            this.state = State.INITIALIZED
         }
         val audioEncoderError = this.audioEncoderError
         val videoEncoderError = this.audioEncoderError
@@ -238,14 +238,17 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         }
         recording.sendEvent(RecordEvent.Start)
         val request = checkNotNull(this.request)
-        val surface = checkNotNull(this.surface)
-        val videoEncoder = checkNotNull(this.videoEncoder)
+        val config = VideoEncoderConfig.default(request.size, 30)
+        val videoEncoder = videoEncoderFactory.create(videoEncoderExecutor, config)
+        val surface = videoEncoder.input.surface()
         val audioConfig = AudioEncoderConfig.default(2, 44100)
         val audioEncoder = audioEncoderFactory.create(audioEncoderExecutor, audioConfig)
         val audioSource = AudioSource(audioConfig, recording.context.applicationContext, audioEncoderExecutor)
         audioSource.setInputBuffer(audioEncoder.input)
         this.audioEncoder = audioEncoder
         this.audioSource = audioSource
+        this.videoEncoder = videoEncoder
+        this.surface = surface
         audioEncoder.setEncoderCallback(AudioEncoderCallback(), executor)
         videoEncoder.setEncoderCallback(VideoEncoderCallback(), executor)
         audioSource.start()
@@ -310,17 +313,6 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         ))
     }
 
-    private fun initializeInternal(request: VideoOutput.SurfaceRequest) {
-        val config = VideoEncoderConfig.default(request.size, 30)
-        val encoder = videoEncoderFactory.create(videoEncoderExecutor, config)
-        this.surface = encoder.input.surface()
-        this.videoEncoder = encoder
-        synchronized(this) {
-            this.request = request
-            this.state = State.INITIALIZED
-        }
-    }
-
     private fun reset() {
         val audioSource = this.audioSource
         if (audioSource != null) {
@@ -347,11 +339,6 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
             this.muxer = null
         }
         this.surface = null
-        val state = if (this.request == null) State.INITIALIZING else State.INITIALIZED
-        synchronized(this) {
-            this.recording = null
-            this.state = state
-        }
     }
 
     private fun checkedExecute(runnable: Runnable) = checkNotNull(this.executor) {
