@@ -4,6 +4,7 @@ import android.content.Context
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.Matrix
+import android.util.Log
 import android.util.Size
 import android.view.Surface
 import androidx.camera.core.CameraSelector
@@ -26,14 +27,18 @@ import java.util.concurrent.Executor
  */
 class VideoCapture<T : VideoOutput> constructor(private val context: Context, val output: T) : CameraRenderer {
 
+    companion object {
+        private const val TAG = "VideoCapture"
+    }
+
+    @Volatile
     private var glExecutor: Executor? = null
     private var env: EGLEnv? = null
 
     private lateinit var programOES: CommonOESProgram
     private lateinit var program2D: Common2DProgram
 
-    private var window: EGLWindow<Surface>? = null
-
+    private var request: SurfaceRequest? = null
     private var resolution: Size? = null
 
     override fun onAttach(glExecutor: Executor, env: EGLEnv) {
@@ -41,15 +46,15 @@ class VideoCapture<T : VideoOutput> constructor(private val context: Context, va
         this.env = env
         this.programOES = CommonOESProgram(context.assets)
         this.program2D = Common2DProgram(context.assets)
-        this.output.onAttach(glExecutor)
+        this.output.onAttach()
     }
 
     override fun onDetach() {
-        resolution = null
-        output.onDetach()
-        window?.release(env!!)
-        window = null
-        env = null
+        this.output.onDetach()
+        this.request = null
+        this.resolution = null
+        this.glExecutor = null
+        this.env = null
     }
 
     override fun onCameraInfo(info: CameraInfo) {
@@ -74,22 +79,13 @@ class VideoCapture<T : VideoOutput> constructor(private val context: Context, va
         // 请求编码的 surface
         val rotate = degree.let { it == 90 || it == 270 }
         resolution = if (rotate) Size(info.size.height, info.size.width) else info.size
-        output.onSurfaceRequest(object : VideoOutput.SurfaceRequest {
-            override val cameraId: String = info.cameraId
-            override val size: Size = info.targetResolution
-            override val degree: Int = 0
-            override val onRequest: (Surface) -> Unit = {
-                window = EGLWindow(it)
-            }
-            override val onRelease: (Surface) -> Unit = {
-                window?.release(checkNotNull(env))
-                window = null
-            }
-        })
+        val surfaceRequest = SurfaceRequest(info)
+        request = surfaceRequest
+        output.onSurfaceRequest(surfaceRequest)
     }
 
     override fun onDraw(input: GLTexture, timestamp: Long): GLTexture {
-        val window = this.window ?: return input
+        val window = this.request?.window ?: return input
         val env = this.env ?: return input
         val resolution = this.resolution ?: return input
         when (input.target) {
@@ -110,6 +106,33 @@ class VideoCapture<T : VideoOutput> constructor(private val context: Context, va
             else -> throw IllegalArgumentException("nonsupport texture type")
         }
         return input
+    }
+
+    private inner class SurfaceRequest(info: CameraInfo) : VideoOutput.SurfaceRequest {
+        override val cameraId: String = info.cameraId
+        override val size: Size = info.targetResolution
+        override val degree: Int = 0
+
+        var window: EGLWindow<Surface>? = null
+            private set
+
+        override fun onRequest(surface: Surface) {
+            glExecutor?.execute {
+                window = EGLWindow(surface)
+            }
+            Log.d(TAG, "on surface requested. $glExecutor")
+        }
+
+        override fun onRelease(surface: Surface) {
+            glExecutor?.execute {
+                val glEnv = env
+                if (glEnv != null) {
+                    window?.release(glEnv)
+                }
+                window = null
+            }
+            Log.d(TAG, "on surface released. $glExecutor")
+        }
     }
 
 }

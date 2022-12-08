@@ -16,6 +16,7 @@ import com.ysj.lib.camera.capture.recorder.encode.config.VideoEncoderConfig
 import java.io.File
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * [VideoOutput] 的默认实现。
@@ -41,6 +42,8 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
     private val audioEncoderFactory = builder.audioEncoderFactory
 
     // ============================== executed by executor ===============================
+
+    private var state = State.INITIALIZING
 
     private var request: VideoOutput.SurfaceRequest? = null
 
@@ -74,27 +77,18 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
     // =============================== guarded by this ====================================
 
     @GuardedBy("this")
-    private var executor: Executor? = null
-
-    @GuardedBy("this")
     private var recording: Recording? = null
-
-    @GuardedBy("this")
-    private var state = State.INITIALIZING
 
     // ====================================================================================
 
+    private val executor = Executors.newSingleThreadExecutor()
     private val audioEncoderExecutor = Executors.newSingleThreadExecutor()
     private val videoEncoderExecutor = Executors.newSingleThreadExecutor()
 
-    @Synchronized
-    override fun onAttach(executor: Executor) {
-        this.executor = executor
-    }
+    override fun onAttach() = Unit
 
-    @Synchronized
-    override fun onDetach() {
-        when (state) {
+    override fun onDetach() = executor.execute {
+        when (this.state) {
             State.INITIALIZING,
             State.INITIALIZED,
             State.PENDING_START -> Unit
@@ -103,14 +97,12 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
                 stopInternal()
             }
         }
-        this.executor = null
-        this.request = null
         this.state = State.INITIALIZING
+        this.request = null
     }
 
     @SuppressLint("MissingPermission")
-    @Synchronized
-    override fun onSurfaceRequest(request: VideoOutput.SurfaceRequest) {
+    override fun onSurfaceRequest(request: VideoOutput.SurfaceRequest) = executor.execute {
         when (this.state) {
             State.INITIALIZING,
             State.INITIALIZED -> {
@@ -140,24 +132,22 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
     }
 
     @SuppressLint("MissingPermission")
-    @Synchronized
-    internal fun start() {
+    private fun start() = executor.execute {
         when (this.state) {
             State.INITIALIZING -> this.state = State.PENDING_START
-            State.INITIALIZED -> checkedExecute(::setupAndStartEncoder)
+            State.INITIALIZED -> setupAndStartEncoder()
             else -> throw IllegalStateException("state error: ${this.state}")
         }
     }
 
-    @Synchronized
-    internal fun stop() {
+    private fun stop() = executor.execute {
         when (this.state) {
             State.INITIALIZING,
             State.INITIALIZED -> Unit
             State.PENDING_START -> this.state = State.INITIALIZING
             State.STARTED,
             State.PAUSED -> {
-                checkedExecute(::stopInternal)
+                stopInternal()
                 this.state = State.INITIALIZED
             }
         }
@@ -173,6 +163,7 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         audioEncoder.stop()
         videoEncoder.stop()
         request.onRelease(surface)
+        this.surface = null
         Log.d(TAG, "stopInternal")
     }
 
@@ -188,7 +179,7 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
             this.recording = null
         }
         val audioEncoderError = this.audioEncoderError
-        val videoEncoderError = this.audioEncoderError
+        val videoEncoderError = this.videoEncoderError
         val event = when {
             audioEncoderError != null -> RecordEvent.Finalize(
                 error = RecordEvent.ERROR_ENCODER,
@@ -229,13 +220,10 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun setupAndStartEncoder() {
-        val recording: Recording
-        val executor: Executor
-        synchronized(this) {
-            recording = checkNotNull(this.recording) { "not prepare !" }
-            executor = checkNotNull(this.executor) { "not attached !" }
-            this.state = State.STARTED
+        val recording: Recording = synchronized(this) {
+            checkNotNull(this.recording) { "not prepare !" }
         }
+        this.state = State.STARTED
         recording.sendEvent(RecordEvent.Start)
         val request = checkNotNull(this.request)
         val config = VideoEncoderConfig.default(request.size, 30)
@@ -338,12 +326,7 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
             }
             this.muxer = null
         }
-        this.surface = null
     }
-
-    private fun checkedExecute(runnable: Runnable) = checkNotNull(this.executor) {
-        "recorder not attached"
-    }.execute(runnable)
 
     private inner class AudioEncoderCallback : EncoderCallback {
 
@@ -450,10 +433,13 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         private var listenerExecutor: Executor? = null
         private var listener: EventListener? = null
 
+        private var rejected = false
+
         fun start(listenerExecutor: Executor, listener: EventListener) {
             this.listenerExecutor = listenerExecutor
             this.listener = listener
-            recorder.start()
+            this.rejected = false
+            this.recorder.start()
         }
 
         fun stop() {
@@ -461,9 +447,19 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         }
 
         fun sendEvent(event: RecordEvent) {
+            if (rejected) {
+                return
+            }
             val eventListener = checkNotNull(listener)
-            checkNotNull(listenerExecutor).execute {
-                eventListener.onEvent(event)
+            val executor = checkNotNull(listenerExecutor)
+            try {
+                executor.execute {
+                    eventListener.onEvent(event)
+                }
+            } catch (e: RejectedExecutionException) {
+                Log.d(TAG, "send event rejected. ${e.message}")
+                listener = null
+                listenerExecutor = null
             }
         }
 

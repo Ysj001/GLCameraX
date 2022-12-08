@@ -14,15 +14,11 @@ interface VideoOutput {
 
     /**
      * 当该 output 被安装时回调。
-     * - 该回调也执行在 [onAttach] 提供的 [Executor] 环境中。
-     *
-     * @param executor 用于执行内部调用的执行器，该执行器必须保证顺序执行。
      */
-    fun onAttach(executor: Executor)
+    fun onAttach()
 
     /**
      * 当该 output 被卸载时回调。
-     * - 该回调也执行在 [onAttach] 提供的 [Executor] 环境中。
      */
     fun onDetach()
 
@@ -32,7 +28,6 @@ interface VideoOutput {
      * 来通知生产者向该 [Surface] 提供数据。
      * - 当该 output 编码完成视频时，即会回调 [SurfaceRequest.onRelease]
      * 来通知生产者不需要在继续提供视频帧了。
-     * - 该回调也执行在 [onAttach] 提供的 [Executor] 环境中。
      */
     fun onSurfaceRequest(request: SurfaceRequest)
 
@@ -55,11 +50,11 @@ interface VideoOutput {
         /**
          * 当 [Surface] 准备好时回调。
          */
-        val onRequest: (Surface) -> Unit
+        fun onRequest(surface: Surface)
 
         /**
          * 当 [Surface] 即将释放时回调。
          */
-        val onRelease: (Surface) -> Unit
+        fun onRelease(surface: Surface)
     }
 }
