@@ -1,15 +1,18 @@
 package com.ysj.lib.camera.capture.recorder.encode
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.media.*
 import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.annotation.RequiresPermission
+import androidx.camera.core.impl.utils.executor.CameraXExecutors
 import com.ysj.lib.camera.capture.recorder.encode.config.AudioEncoderConfig
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * 封装音频源，作为音频数据的生产者。
@@ -20,7 +23,7 @@ import java.util.concurrent.TimeUnit
 class AudioSource @RequiresPermission(Manifest.permission.RECORD_AUDIO) constructor(
     config: AudioEncoderConfig,
     context: Context,
-    private val executor: Executor,
+    executor: Executor,
 ) {
 
     companion object {
@@ -38,6 +41,9 @@ class AudioSource @RequiresPermission(Manifest.permission.RECORD_AUDIO) construc
 
     class AccessException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
+    @SuppressLint("RestrictedApi")
+    private val executor = CameraXExecutors.newSequentialExecutor(executor)
+
     private var state: State = State.INITIALIZED
 
     private val bufferSize: Int
@@ -45,6 +51,9 @@ class AudioSource @RequiresPermission(Manifest.permission.RECORD_AUDIO) construc
     private val recordingCallback: AudioManager.AudioRecordingCallback?
 
     private var bufferInput: Encoder.ByteBufferInput? = null
+
+    private var callback: Callback? = null
+    private var callbackExecutor: Executor? = null
 
     init {
         if (!isSupported(config.channelCount, config.sampleRate, encoding)) {
@@ -89,6 +98,18 @@ class AudioSource @RequiresPermission(Manifest.permission.RECORD_AUDIO) construc
         }
     }
 
+    fun setCallback(callback: Callback, executor: Executor) = executor.execute {
+        when (this.state) {
+            State.INITIALIZED -> {
+                this.callback = callback
+                this.callbackExecutor = executor
+            }
+            else -> throw IllegalStateException(
+                "The audio recording callback must be registered before the audio source is started."
+            )
+        }
+    }
+
     fun setInputBuffer(bufferInput: Encoder.ByteBufferInput) = executor.execute {
         when (this.state) {
             State.INITIALIZED,
@@ -122,6 +143,8 @@ class AudioSource @RequiresPermission(Manifest.permission.RECORD_AUDIO) construc
             State.INITIALIZED,
             State.STARTED -> {
                 bufferInput = null
+                callback = null
+                callbackExecutor = null
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && recordingCallback != null) {
                     recorder.unregisterAudioRecordingCallback(recordingCallback)
                 }
@@ -134,7 +157,11 @@ class AudioSource @RequiresPermission(Manifest.permission.RECORD_AUDIO) construc
     }
 
     private fun notifyError(throwable: Throwable) {
-        // todo
+        val callback = this.callback ?: return
+        val callbackExecutor = this.callbackExecutor ?: return
+        callbackExecutor.execute {
+            callback.onError(throwable)
+        }
     }
 
     private fun sendNextAudio() {
@@ -241,9 +268,39 @@ class AudioSource @RequiresPermission(Manifest.permission.RECORD_AUDIO) construc
 
     @RequiresApi(Build.VERSION_CODES.N)
     private inner class RecordingCallback : AudioManager.AudioRecordingCallback() {
-        override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>?) {
-            // todo
+
+        private val sourceSilence = AtomicBoolean(false)
+
+        override fun onRecordingConfigChanged(configs: MutableList<AudioRecordingConfiguration>) {
             super.onRecordingConfigChanged(configs)
+            val callback = this@AudioSource.callback ?: return
+            val callbackExecutor = this@AudioSource.callbackExecutor ?: return
+            for (config in configs) {
+                if (config.clientAudioSessionId == recorder.audioSessionId) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val silenced = config.isClientSilenced
+                        if (sourceSilence.getAndSet(silenced) != silenced) {
+                            callbackExecutor.execute {
+                                callback.onSilenced(silenced)
+                            }
+                        }
+                        break
+                    }
+                }
+            }
         }
+    }
+
+    interface Callback {
+
+        /**
+         * 当音频源被静音时回调。此时音频源将继续提供被静音的音频数据。
+         */
+        fun onSilenced(silenced: Boolean)
+
+        /**
+         * 当音频源遇到错误时调用。
+         */
+        fun onError(throwable: Throwable)
     }
 }
