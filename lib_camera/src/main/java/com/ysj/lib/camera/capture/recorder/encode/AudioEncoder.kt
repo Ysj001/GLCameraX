@@ -1,9 +1,12 @@
 package com.ysj.lib.camera.capture.recorder.encode
 
+import android.annotation.SuppressLint
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.util.Log
 import androidx.annotation.GuardedBy
+import androidx.camera.core.impl.utils.executor.CameraXExecutors
+import androidx.core.util.Pools
 import com.ysj.lib.camera.capture.recorder.encode.config.AudioEncoderConfig
 import com.ysj.lib.camera.capture.recorder.encode.config.mime
 import java.nio.ByteBuffer
@@ -12,6 +15,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
 
 /**
  * 音频编码器。
@@ -19,7 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * @author Ysj
  * Create time: 2022/11/2
  */
-class AudioEncoder constructor(private val executor: Executor, config: AudioEncoderConfig) : Encoder<Encoder.ByteBufferInput> {
+class AudioEncoder constructor(executor: Executor, config: AudioEncoderConfig) : Encoder<Encoder.ByteBufferInput> {
 
     companion object {
         private const val TAG = "AudioEncoder"
@@ -35,6 +39,9 @@ class AudioEncoder constructor(private val executor: Executor, config: AudioEnco
         PENDING_RELEASE,
         RELEASED,
     }
+
+    @SuppressLint("RestrictedApi")
+    private val executor = CameraXExecutors.newSequentialExecutor(executor)
 
     private val format: MediaFormat = config.toMediaFormat()
     private val codec: MediaCodec = MediaCodec.createEncoderByType(format.mime)
@@ -110,7 +117,7 @@ class AudioEncoder constructor(private val executor: Executor, config: AudioEnco
     override fun requestKeyFrame() = Unit
 
     private fun signalEndOfInputStream() {
-        if (isSignalEnd) {
+        if (state == Status.INITIALIZED || state == Status.RELEASED || isSignalEnd) {
             return
         }
         val buffer = input.acquireBuffer()
@@ -122,10 +129,12 @@ class AudioEncoder constructor(private val executor: Executor, config: AudioEnco
         buffer.setEndOfStream(true)
         buffer.submit()
         isSignalEnd = true
+        bufferInput.release()
         Log.d(TAG, "signalEndOfInputStream")
     }
 
     private fun onStop() {
+        bufferInput.release()
         codec.flush()
         codec.stop()
         reset()
@@ -134,9 +143,9 @@ class AudioEncoder constructor(private val executor: Executor, config: AudioEnco
     }
 
     private fun onRelease() {
+        bufferInput.release()
         codec.reset()
         codec.release()
-        bufferInput.release()
         this.state = Status.RELEASED
         Log.d(TAG, "onRelease")
     }
@@ -152,7 +161,7 @@ class AudioEncoder constructor(private val executor: Executor, config: AudioEnco
             Status.PENDING_RELEASE,
             Status.PAUSED -> {
                 callback(callback = { onEncodeError(t) })
-                release()
+                onRelease()
             }
             Status.RELEASED -> Unit
         }
@@ -185,67 +194,118 @@ class AudioEncoder constructor(private val executor: Executor, config: AudioEnco
 
     private inner class MediaCodecCallback : MediaCodec.Callback() {
 
+        private val dataPool = Pools.SimplePool<EncodeDataImpl>(5)
+
         private var hasFirstData = false
+        private var hasEndData = false
 
         private var lastPresentationTimeUs = 0L
 
         override fun onInputBufferAvailable(codec: MediaCodec, index: Int) = executor.execute {
-            bufferInput.offerBuffer(index)
+            if (!isSignalEnd) {
+                bufferInput.offerBuffer(index)
+            }
         }
 
         override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) = executor.execute {
-            if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                codec.releaseOutputBuffer(index, false)
-                when (state) {
-                    Status.PENDING_STOP -> onStop()
-                    Status.PENDING_RELEASE -> {
-                        onStop()
-                        onRelease()
-                    }
-                    else -> Unit
-                }
-                return@execute
-            }
-            if (!hasFirstData) {
-                hasFirstData = true
-                callback(callback = { onEncodeStart() })
-            }
-            // MediaCodec may send out of order buffer
-            if (info.presentationTimeUs <= lastPresentationTimeUs) {
-                try {
-                    Log.d(TAG, "Drop buffer by out of order buffer from MediaCodec.")
-                    codec.releaseOutputBuffer(index, false)
-                } catch (e: MediaCodec.CodecException) {
-                    handleEncodeError(e)
-                }
-                return@execute
-            }
-            if (isSignalEnd) {
-                try {
-                    Log.d(TAG, "Drop buffer by not in start-stop range.")
-                    codec.releaseOutputBuffer(index, false)
-                } catch (e: MediaCodec.CodecException) {
-                    handleEncodeError(e)
-                }
-                return@execute
-            }
-            lastPresentationTimeUs = info.presentationTimeUs
-            val needEnd = state == Status.PENDING_STOP || state == Status.PENDING_RELEASE
-            val data = EncodeDataImpl()
+            val data = dataPool.acquire() ?: EncodeDataImpl(dataPool)
+            data.reset()
             data.codec = codec
             data.bufferIndex = index
             data.bufferInfo = info
             data.buffer = codec.getOutputBuffer(index)!!
-            callback(
-                callback = {
-                    onEncodeData(data)
-                    if (needEnd) {
-                        // 要等最后一个数据写完才能停止，否则 releaseOutputBuffer 可能报状态异常
-                        executor.execute(::signalEndOfInputStream)
+            if (hasEndData) {
+                Log.d(TAG, "Drop buffer by already reach end of stream.")
+                data.close()
+                return@execute
+            }
+            if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                Log.d(TAG, "Drop buffer by codec config.")
+                data.close()
+                return@execute
+            }
+            if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM == 0) {
+                if (info.size <= 0) {
+                    Log.d(TAG, "Drop buffer by invalid buffer size.")
+                    data.close()
+                    return@execute
+                }
+                if (info.presentationTimeUs <= lastPresentationTimeUs) {
+                    try {
+                        Log.d(TAG, "Drop buffer by out of order buffer from MediaCodec.")
+                        data.close()
+                    } catch (e: MediaCodec.CodecException) {
+                        handleEncodeError(e)
                     }
-                },
-                onRejected = { data.close() }
-            )
+                    return@execute
+                }
+                if (isSignalEnd) {
+                    Log.d(TAG, "Drop buffer by not in start-stop range.")
+                    data.close()
+                    return@execute
+                }
+                if (!hasFirstData) {
+                    hasFirstData = true
+                    callback(callback = { onEncodeStart() })
+                }
+                lastPresentationTimeUs = info.presentationTimeUs
+                val needEnd = state == Status.PENDING_STOP || state == Status.PENDING_RELEASE
+                callback(
+                    callback = {
+                        onEncodeData(data)
+                        if (needEnd) {
+                            // 要等最后一个数据写完才能停止，否则 releaseOutputBuffer 可能报状态异常
+                            executor.execute(::signalEndOfInputStream)
+                        }
+                    },
+                    onRejected = { data.close() }
+                )
+            } else {
+                hasEndData = true
+                val needEncode = info.size > 0 && info.presentationTimeUs > lastPresentationTimeUs
+                when (state) {
+                    Status.PENDING_STOP -> {
+                        if (needEncode) {
+                            callback(
+                                callback = {
+                                    onEncodeData(data)
+                                    executor.execute(::onStop)
+                                },
+                                onRejected = {
+                                    data.close()
+                                    onStop()
+                                }
+                            )
+                        } else {
+                            data.close()
+                            onStop()
+                        }
+                    }
+                    Status.PENDING_RELEASE -> {
+                        if (needEncode) {
+                            callback(
+                                callback = {
+                                    onEncodeData(data)
+                                    executor.execute {
+                                        onStop()
+                                        onRelease()
+                                    }
+                                },
+                                onRejected = {
+                                    data.close()
+                                    onStop()
+                                    onRelease()
+                                }
+                            )
+                        } else {
+                            data.close()
+                            onStop()
+                            onRelease()
+                        }
+                    }
+                    else -> data.close()
+                }
+            }
         }
 
         override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) = executor.execute {
@@ -262,23 +322,48 @@ class AudioEncoder constructor(private val executor: Executor, config: AudioEnco
 
         private val freeBufferIndexQueue = ArrayDeque<Int>()
 
+        private val lock = ReentrantLock()
+
         override fun acquireBuffer(): Encoder.InputBuffer? {
-            if (!isSignalEnd && state != Status.INITIALIZED && state != Status.RELEASED) {
-                return InputBuffer(freeBufferIndexQueue.poll() ?: return null)
+            lock.lock()
+            val bufferIndex = synchronized(freeBufferIndexQueue) {
+                freeBufferIndexQueue.poll()
             }
-            return null
+            if (bufferIndex == null) {
+                lock.unlock()
+                return null
+            }
+            return object : InputBuffer(bufferIndex) {
+                override fun submit(): Boolean {
+                    val submit = super.submit()
+                    lock.unlock()
+                    return submit
+                }
+
+                override fun cancel(): Boolean {
+                    val cancel = super.cancel()
+                    lock.unlock()
+                    return cancel
+                }
+            }
         }
 
         fun release() {
-            freeBufferIndexQueue.clear()
+            lock.lock()
+            synchronized(freeBufferIndexQueue) {
+                freeBufferIndexQueue.clear()
+            }
+            lock.unlock()
         }
 
         fun offerBuffer(bufferIndex: Int) {
-            freeBufferIndexQueue.offer(bufferIndex)
+            synchronized(freeBufferIndexQueue) {
+                freeBufferIndexQueue.offer(bufferIndex)
+            }
         }
     }
 
-    private inner class InputBuffer(val bufferIndex: Int) : Encoder.InputBuffer {
+    private open inner class InputBuffer(val bufferIndex: Int) : Encoder.InputBuffer {
 
         private val terminated = AtomicBoolean(false)
 
@@ -331,37 +416,43 @@ class AudioEncoder constructor(private val executor: Executor, config: AudioEnco
         }
     }
 
-    private inner class EncodeDataImpl : EncodeData {
+    private class EncodeDataImpl(private val pool: Pools.Pool<EncodeDataImpl>) : EncodeData {
 
-        lateinit var codec: MediaCodec
-        lateinit var bufferInfo: MediaCodec.BufferInfo
+        var codec: MediaCodec? = null
+        var bufferInfo: MediaCodec.BufferInfo? = null
         var bufferIndex: Int = -1
-        lateinit var buffer: ByteBuffer
+        var buffer: ByteBuffer? = null
 
         private val closed = AtomicBoolean(false)
 
         override fun buffer(): ByteBuffer {
             check(!closed.get()) { "encoded data is closed." }
+            val buffer = checkNotNull(this.buffer)
+            val bufferInfo = checkNotNull(this.bufferInfo)
             buffer.position(bufferInfo.offset)
             buffer.limit(bufferInfo.offset + bufferInfo.size)
             return buffer
         }
 
-        override fun bufferInfo(): MediaCodec.BufferInfo = bufferInfo
-        override fun presentationTimeUs() = bufferInfo.presentationTimeUs
+        override fun bufferInfo(): MediaCodec.BufferInfo = checkNotNull(bufferInfo)
+        override fun presentationTimeUs() = checkNotNull(bufferInfo).presentationTimeUs
         override fun isKeyFrame(): Boolean = true
-        override fun size() = bufferInfo.size
+        override fun size() = checkNotNull(bufferInfo).size
 
         override fun close() {
             if (closed.getAndSet(true)) {
                 return
             }
-            try {
-                codec.releaseOutputBuffer(bufferIndex, false)
-            } catch (e: IllegalStateException) {
-                Log.e(TAG, "release output buffer failure. ${presentationTimeUs()} , $bufferIndex")
-                throw e
-            }
+            checkNotNull(codec).releaseOutputBuffer(bufferIndex, false)
+            pool.release(this)
+        }
+
+        fun reset() {
+            closed.set(false)
+            codec = null
+            bufferInfo = null
+            bufferIndex = -1
+            buffer = null
         }
     }
 }
