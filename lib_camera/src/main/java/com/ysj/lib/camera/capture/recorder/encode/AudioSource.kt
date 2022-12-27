@@ -147,11 +147,12 @@ class AudioSource @RequiresPermission(Manifest.permission.RECORD_AUDIO) construc
             executor.execute(::sendNextAudio)
             return
         }
+        val presentationTimeUs = generatePresentationTimeUs()
         val buffer = inputBuffer.buffer()
         val length = recorder.read(buffer, bufferSize)
         if (length > 0) {
             buffer.limit(length)
-            inputBuffer.setPresentationTimeUs(generatePresentationTimeUs())
+            inputBuffer.setPresentationTimeUs(presentationTimeUs)
             inputBuffer.submit()
         } else {
             Log.w(TAG, "Unable to read data from AudioRecord.")
