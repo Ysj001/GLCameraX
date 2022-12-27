@@ -10,6 +10,7 @@ import android.util.Log
 import android.view.Surface
 import androidx.annotation.GuardedBy
 import androidx.annotation.RequiresPermission
+import androidx.camera.core.impl.utils.executor.CameraXExecutors
 import com.ysj.lib.camera.capture.recorder.encode.*
 import com.ysj.lib.camera.capture.recorder.encode.config.AudioEncoderConfig
 import com.ysj.lib.camera.capture.recorder.encode.config.VideoEncoderConfig
@@ -37,6 +38,12 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         STARTED,
         PAUSED,
     }
+
+    @SuppressLint("RestrictedApi")
+    private val executor = builder.executor ?: CameraXExecutors.ioExecutor()
+
+    @SuppressLint("RestrictedApi")
+    private val sequentialExecutor = CameraXExecutors.newSequentialExecutor(executor)
 
     private val videoEncoderFactory = builder.videoEncoderFactory
     private val audioEncoderFactory = builder.audioEncoderFactory
@@ -81,13 +88,9 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
 
     // ====================================================================================
 
-    private val executor = Executors.newSingleThreadExecutor()
-    private val audioEncoderExecutor = Executors.newSingleThreadExecutor()
-    private val videoEncoderExecutor = Executors.newSingleThreadExecutor()
-
     override fun onAttach() = Unit
 
-    override fun onDetach() = executor.execute {
+    override fun onDetach() = sequentialExecutor.execute {
         when (this.state) {
             State.INITIALIZING,
             State.INITIALIZED,
@@ -102,7 +105,7 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
     }
 
     @SuppressLint("MissingPermission")
-    override fun onSurfaceRequest(request: VideoOutput.SurfaceRequest) = executor.execute {
+    override fun onSurfaceRequest(request: VideoOutput.SurfaceRequest) = sequentialExecutor.execute {
         when (this.state) {
             State.INITIALIZING,
             State.INITIALIZED -> {
@@ -132,7 +135,7 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
     }
 
     @SuppressLint("MissingPermission")
-    private fun start() = executor.execute {
+    private fun start() = sequentialExecutor.execute {
         when (this.state) {
             State.INITIALIZING -> this.state = State.PENDING_START
             State.INITIALIZED -> setupAndStartEncoder()
@@ -140,7 +143,7 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         }
     }
 
-    private fun stop() = executor.execute {
+    private fun stop() = sequentialExecutor.execute {
         when (this.state) {
             State.INITIALIZING,
             State.INITIALIZED -> Unit
@@ -224,22 +227,22 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         val recording: Recording = synchronized(this) {
             checkNotNull(this.recording) { "not prepare !" }
         }
-        this.state = State.STARTED
-        recording.sendEvent(RecordEvent.Start)
         val request = checkNotNull(this.request)
         val config = VideoEncoderConfig.default(request.size, 30)
-        val videoEncoder = videoEncoderFactory.create(videoEncoderExecutor, config)
+        val videoEncoder = videoEncoderFactory.create(executor, config)
         val surface = videoEncoder.input.surface()
         val audioConfig = AudioEncoderConfig.default(2, 44100)
-        val audioEncoder = audioEncoderFactory.create(audioEncoderExecutor, audioConfig)
-        val audioSource = AudioSource(audioConfig, recording.context.applicationContext, audioEncoderExecutor)
+        val audioEncoder = audioEncoderFactory.create(executor, audioConfig)
+        val audioSource = AudioSource(audioConfig, recording.context.applicationContext, executor)
+        audioSource.setCallback(AudioSourceCallback(), sequentialExecutor)
         audioSource.setInputBuffer(audioEncoder.input)
         this.audioEncoder = audioEncoder
         this.audioSource = audioSource
         this.videoEncoder = videoEncoder
         this.surface = surface
-        audioEncoder.setEncoderCallback(AudioEncoderCallback(), executor)
-        videoEncoder.setEncoderCallback(VideoEncoderCallback(), executor)
+        this.state = State.STARTED
+        audioEncoder.setEncoderCallback(AudioEncoderCallback(), sequentialExecutor)
+        videoEncoder.setEncoderCallback(VideoEncoderCallback(), sequentialExecutor)
         audioSource.start()
         audioEncoder.start()
         videoEncoder.start()
@@ -276,6 +279,7 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         audioFirstData.close()
         this.audioFirstData = null
         this.videoFirstData = null
+        recording.sendEvent(RecordEvent.Start)
         Log.d(TAG, "setupAndStartMediaMuxer")
     }
 
@@ -326,6 +330,18 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
                 Log.w(TAG, "release muxer failure. os-level=${Build.VERSION.SDK_INT} , brand=${Build.BRAND} , model=${Build.MODEL}", it)
             }
             this.muxer = null
+        }
+    }
+
+    private inner class AudioSourceCallback : AudioSource.Callback {
+        override fun onSilenced(silenced: Boolean) {
+            // todo 通知音频源被静音了
+            Log.d(TAG, "audio source silenced: $silenced")
+        }
+
+        override fun onError(throwable: Throwable) {
+            // todo 异常处理
+            Log.w(TAG, "audio source error.", throwable)
         }
     }
 
@@ -471,6 +487,8 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
 
     class Builder {
 
+        internal var executor: Executor? = null
+
         internal var videoEncoderFactory = EncoderFactory(::VideoEncoder)
 
         internal var audioEncoderFactory = EncoderFactory(::AudioEncoder)
@@ -481,6 +499,15 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
 
         fun setAudioEncoderFactory(factory: EncoderFactory<AudioEncoderConfig, Encoder.ByteBufferInput>) = apply {
             this.audioEncoderFactory = factory
+        }
+
+        /**
+         * 设置用于执行录制任务的 [Executor]。
+         * - 为了获得最佳性能，建议使用至少能同时运行 2 个任务的 [Executor]。
+         * - 如果不设置默认使用 [CameraXExecutors.ioExecutor]。
+         */
+        fun setExecutor(executor: Executor?) = apply {
+            this.executor = executor
         }
 
         fun build(): Recorder {
