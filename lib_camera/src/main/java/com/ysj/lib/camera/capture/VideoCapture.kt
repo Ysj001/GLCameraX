@@ -40,8 +40,12 @@ class VideoCapture<T : VideoOutput> constructor(private val context: Context, va
     private lateinit var programOES: CommonOESProgram
     private lateinit var program2D: Common2DProgram
 
+    private var info: CameraInfo? = null
+
     private var request: SurfaceRequest? = null
     private var resolution: Size? = null
+
+    private var degree = 0
 
     override fun onAttach(glExecutor: Executor, env: EGLEnv) {
         this.glExecutor = glExecutor
@@ -55,11 +59,14 @@ class VideoCapture<T : VideoOutput> constructor(private val context: Context, va
         this.output.onDetach()
         this.request = null
         this.resolution = null
+        this.info = null
+        this.degree = 0
         this.glExecutor = null
         this.env = null
     }
 
     override fun onCameraInfo(info: CameraInfo) {
+        this.info = info
         // 矫正相机的 oes 纹理
         Matrix.setIdentityM(programOES.matrix, 0)
         val lensFacing = info.lensFacing
@@ -110,10 +117,29 @@ class VideoCapture<T : VideoOutput> constructor(private val context: Context, va
         return input
     }
 
+    /**
+     * 设置输出视频的旋转角度。
+     * @param degree 角度。注意只能是 90/180/270。
+     */
+    fun setRotation(degree: Int) {
+        val executor = glExecutor
+        if (executor == null) {
+            this.degree = degree
+            return
+        }
+        executor.execute {
+            this.degree = degree
+            val info = this.info
+            if (info != null) {
+                onCameraInfo(info)
+            }
+        }
+    }
+
     private inner class SurfaceRequest(info: CameraInfo) : VideoOutput.SurfaceRequest {
         override val cameraId: String = info.cameraId
         override val size: Size = info.targetResolution
-        override val degree: Int = 0
+        override val degree: Int = this@VideoCapture.degree
 
         var window: EGLWindow<Surface>? = null
             private set
