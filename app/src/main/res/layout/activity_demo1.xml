@@ -5,7 +5,7 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/black"
-    tools:context=".MainActivity">
+    tools:context=".Demo1Activity">
 
     <androidx.fragment.app.FragmentContainerView
         android:id="@+id/frgCamera"
@@ -26,19 +26,46 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <Space
+    <View
         android:id="@+id/header"
         android:layout_width="0dp"
-        android:layout_height="0dp"
-        app:layout_constraintTop_toBottomOf="@id/spaceStatusBar"
+        android:layout_height="48dp"
+        android:background="#80000000"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent" />
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/spaceStatusBar" />
+
+    <TextView
+        android:id="@+id/btnRatio"
+        android:layout_width="wrap_content"
+        android:layout_height="0dp"
+        android:gravity="center"
+        android:includeFontPadding="false"
+        android:paddingHorizontal="8dp"
+        android:textColor="@color/white"
+        android:textSize="12sp"
+        app:layout_constraintBottom_toBottomOf="@id/header"
+        app:layout_constraintEnd_toEndOf="@id/header"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="@id/header"
+        tools:text="16:9" />
+
+    <TextView
+        android:id="@+id/tvFps"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        android:textColor="@color/purple_500"
+        android:textSize="14sp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/header"
+        tools:text="30fps" />
 
     <androidx.cardview.widget.CardView
         android:id="@+id/cardRecordTime"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
+        android:layout_marginTop="32dp"
         android:visibility="gone"
         app:cardBackgroundColor="@color/red"
         app:cardCornerRadius="16dp"
@@ -55,8 +82,8 @@
             android:gravity="center"
             android:includeFontPadding="false"
             android:paddingHorizontal="16dp"
-            tools:text="00:00:00"
-            android:textColor="@color/white" />
+            android:textColor="@color/white"
+            tools:text="00:00:00" />
 
     </androidx.cardview.widget.CardView>
 
