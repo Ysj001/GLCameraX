@@ -16,7 +16,9 @@ import com.ysj.lib.camera.gl.texture.GLTexture
 import com.ysj.lib.camera.gl.window.EGLWindow
 import com.ysj.lib.camera.render.CameraInfo
 import com.ysj.lib.camera.render.CameraRenderer
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * 视频捕获。
@@ -124,14 +126,30 @@ class VideoCapture<T : VideoOutput> constructor(private val context: Context, va
         }
 
         override fun onRelease(surface: Surface) {
-            glExecutor?.execute {
-                val glEnv = env
-                if (glEnv != null) {
-                    window?.release(glEnv)
+            val executor = glExecutor
+            if (executor != null) {
+                val launch = CountDownLatch(1)
+                try {
+                    executor.execute {
+                        try {
+                            val glEnv = env
+                            val glWindow = window
+                            if (glEnv != null && glWindow != null) {
+                                glWindow.release(glEnv)
+                            }
+                            window = null
+                        } finally {
+                            launch.countDown()
+                        }
+                    }
+                    launch.await()
+                } catch (e: RejectedExecutionException) {
+                    Log.d(TAG, "window release rejected.")
+                } catch (e: InterruptedException) {
+                    Thread.interrupted()
                 }
-                window = null
             }
-            Log.d(TAG, "on surface released. $glExecutor")
+            Log.d(TAG, "on surface released. $executor")
         }
     }
 

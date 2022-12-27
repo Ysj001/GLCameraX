@@ -161,8 +161,8 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         val videoEncoder = checkNotNull(this.videoEncoder)
         audioSource.stop()
         audioEncoder.stop()
-        videoEncoder.stop()
         request.onRelease(surface)
+        videoEncoder.stop()
         this.surface = null
         Log.d(TAG, "stopInternal")
     }
@@ -216,6 +216,7 @@ class Recorder private constructor(builder: Builder) : VideoOutput {
         this.recordingDurationUs = 0L
 
         reset()
+        Log.d(TAG, "finalizeRecording")
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
