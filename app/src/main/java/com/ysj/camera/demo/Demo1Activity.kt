@@ -17,8 +17,8 @@ import androidx.camera.core.impl.SessionConfig
 import androidx.core.content.ContextCompat
 import androidx.core.view.*
 import com.ysj.camera.demo.databinding.ActivityDemo1Binding
+import com.ysj.camera.demo.renders.Effects
 import com.ysj.camera.demo.renders.FpsCapture
-import com.ysj.camera.demo.renders.OesTo2d
 import com.ysj.lib.camera.CameraFragment
 import com.ysj.lib.camera.CameraViewModel
 import com.ysj.lib.camera.capture.VideoCapture
@@ -52,8 +52,8 @@ class Demo1Activity : AppCompatActivity() {
         OrientationListener()
     }
 
-    private val oesTo2D by lazy(LazyThreadSafetyMode.NONE) {
-        OesTo2d(this)
+    private val effects by lazy(LazyThreadSafetyMode.NONE) {
+        Effects(this)
     }
 
     private val videoCapture by lazy(LazyThreadSafetyMode.NONE) {
@@ -69,37 +69,17 @@ class Demo1Activity : AppCompatActivity() {
         CameraParam(
             rationalName = "9:16",
             rational = null,
-            rationalRotation = Rational(16, 9),
             resolution = Size(720, 1280),
-            resolutionRotation = Size(720, 960),
         ),
         CameraParam(
             rationalName = "3:4",
             rational = null,
-            rationalRotation = Rational(4, 3),
             resolution = Size(720, 960),
-            resolutionRotation = Size(720, 960),
         ),
         CameraParam(
             rationalName = "1:1",
             rational = Rational(1, 1),
-            rationalRotation = Rational(1, 1),
             resolution = Size(720, 960),
-            resolutionRotation = Size(720, 960),
-        ),
-        CameraParam(
-            rationalName = "4:3",
-            rational = Rational(4, 3),
-            rationalRotation = null,
-            resolution = Size(720, 960),
-            resolutionRotation = Size(720, 960),
-        ),
-        CameraParam(
-            rationalName = "16:9",
-            rational = Rational(16, 9),
-            rationalRotation = null,
-            resolution = Size(720, 960),
-            resolutionRotation = Size(720, 1280),
         ),
     )
 
@@ -114,7 +94,7 @@ class Demo1Activity : AppCompatActivity() {
         vb = ActivityDemo1Binding.inflate(layoutInflater)
         setContentView(vb.root)
         initViews()
-//        cameraViewModel.renderManager.addRenderer(oesTo2D)
+        cameraViewModel.renderManager.addRenderer(effects)
         cameraViewModel.renderManager.addRenderer(videoCapture)
         cameraViewModel.renderManager.addRenderer(fpsCapture)
         initCamera()
@@ -192,22 +172,22 @@ class Demo1Activity : AppCompatActivity() {
 
     @SuppressLint("RestrictedApi")
     private fun onRatioClicked() {
+        val config = checkNotNull(cameraViewModel.cameraConfig.value)
+        val oldIndex = currentRationalIndex
         currentRationalIndex++
         if (currentRationalIndex == rationals.size) {
             currentRationalIndex = 0
         }
         vb.btnRatio.text = rationals[currentRationalIndex].rationalName
-        resetCamera()
-    }
-
-    @SuppressLint("RestrictedApi")
-    private fun resetCamera() {
-        val config = checkNotNull(cameraViewModel.cameraConfig.value)
+        val oldCameraParam = rationals[oldIndex]
         val cameraParam = rationals[currentRationalIndex]
-        cameraViewModel.setAspectRatio(cameraParam.rational(currentSensorDegree))
+        cameraViewModel.setAspectRatio(cameraParam.rational)
+        if (oldCameraParam.resolution == cameraParam.resolution) {
+            return
+        }
         cameraViewModel.setCameraConfig(config.copy(
             preview = Preview.Builder()
-                .setTargetResolution(cameraParam.resolution(currentSensorDegree))
+                .setTargetResolution(cameraParam.resolution)
                 .setDefaultSessionConfig(SessionConfig.Builder()
                     .apply { setTemplateType(CameraDevice.TEMPLATE_RECORD) }
                     .build())
@@ -218,11 +198,11 @@ class Demo1Activity : AppCompatActivity() {
     @SuppressLint("RestrictedApi")
     private fun initCamera() {
         val cameraParam = rationals[currentRationalIndex]
-        cameraViewModel.setAspectRatio(cameraParam.rational(currentSensorDegree))
+        cameraViewModel.setAspectRatio(cameraParam.rational)
         cameraViewModel.setCameraConfig(CameraViewModel.CameraConfig(
             lensFacing = CameraSelector.LENS_FACING_FRONT,
             preview = Preview.Builder()
-                .setTargetResolution(cameraParam.resolution(currentSensorDegree))
+                .setTargetResolution(cameraParam.resolution)
                 .setDefaultSessionConfig(SessionConfig.Builder()
                     .apply { setTemplateType(CameraDevice.TEMPLATE_RECORD) }
                     .build())
@@ -267,7 +247,6 @@ class Demo1Activity : AppCompatActivity() {
             }
             if (degree != currentSensorDegree) {
                 currentSensorDegree = degree
-                resetCamera()
                 videoCapture.setRotation(degree)
             }
         }
@@ -275,12 +254,7 @@ class Demo1Activity : AppCompatActivity() {
 
     private class CameraParam(
         val rationalName: String,
-        private val rational: Rational?,
-        private val rationalRotation: Rational?,
-        private val resolution: Size,
-        private val resolutionRotation: Size,
-    ) {
-        fun rational(degree: Int) = if (degree == 90 || degree == 270) rationalRotation else rational
-        fun resolution(degree: Int) = if (degree == 90 || degree == 270) resolutionRotation else resolution
-    }
+        val rational: Rational?,
+        val resolution: Size,
+    )
 }
