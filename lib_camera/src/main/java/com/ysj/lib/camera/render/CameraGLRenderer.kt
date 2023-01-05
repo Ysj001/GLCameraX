@@ -32,6 +32,9 @@ class CameraGLRenderer(context: Context) : Preview.SurfaceProvider, Closeable {
     private val mainExecutor = ContextCompat.getMainExecutor(context)
 
     private val cameraGLEnv = CameraGLEnv(context)
+
+    private var preview: Preview? = null
+
     private var previewSurfaceProvider: SurfaceProvider? = null
 
     private var unbindWindowRunnable: Runnable? = null
@@ -83,6 +86,11 @@ class CameraGLRenderer(context: Context) : Preview.SurfaceProvider, Closeable {
     }
 
     @MainThread
+    fun setPreview(preview: Preview?) {
+        this.preview = preview
+    }
+
+    @MainThread
     fun setTargetAspectRatio(ratio: Rational?) {
         val surfaceProvider = checkNotNull(previewSurfaceProvider) {
             "not bind window"
@@ -116,9 +124,8 @@ class CameraGLRenderer(context: Context) : Preview.SurfaceProvider, Closeable {
             aspectRatio = ratio
             targetAspectRatio = ratio
             Log.d(TAG, "surface view set target aspect ratio: $ratio")
-            val request = this.request
             if (request != null) {
-                onSurfaceRequested(request)
+                preview?.setSurfaceProvider(this@CameraGLRenderer)
             }
         }
 
@@ -172,7 +179,7 @@ class CameraGLRenderer(context: Context) : Preview.SurfaceProvider, Closeable {
                 width = viewWidth
                 height = viewHeight
             }
-            surfaceView.post { setSurfaceRequest(request) }
+            setSurfaceRequest(request)
         }
 
         override fun surfaceCreated(holder: SurfaceHolder) {
@@ -202,6 +209,7 @@ class CameraGLRenderer(context: Context) : Preview.SurfaceProvider, Closeable {
         @SuppressLint("RestrictedApi")
         private fun setSurfaceRequest(request: SurfaceRequest) {
             // 老的取消掉
+            cameraGLEnv.unbindWindow()
             this.request?.willNotProvideSurface()
             this.request = request
             this.wasSurfaceProvided = false

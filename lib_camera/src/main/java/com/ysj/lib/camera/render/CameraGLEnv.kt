@@ -135,7 +135,12 @@ class CameraGLEnv(private val context: Context) : SurfaceTexture.OnFrameAvailabl
     }
 
     fun unbindWindow() = glThread.exec {
-        glWindow?.release(it)
+        val gw = glWindow ?: return@exec
+        gw.selectCurrent(it)
+        GLES20.glClearColor(0f, 0f, 0f, 1f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        gw.swapBuffers(it)
+        gw.release(it)
         glWindow = null
     }
 

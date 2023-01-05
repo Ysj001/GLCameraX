@@ -119,7 +119,7 @@ class VideoCapture<T : VideoOutput> constructor(private val context: Context, va
 
     /**
      * 设置输出视频的旋转角度。
-     * @param degree 角度。注意只能是 90/180/270。
+     * @param degree 角度。注意只能是 0/90/180/270。
      */
     fun setRotation(degree: Int) {
         val executor = glExecutor

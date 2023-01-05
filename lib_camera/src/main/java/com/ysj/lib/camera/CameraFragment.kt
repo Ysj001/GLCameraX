@@ -51,6 +51,7 @@ class CameraFragment : Fragment(R.layout.lib_camera_fragment_camera) {
     override fun onDestroyView() {
         super.onDestroyView()
         cameraGlRender.unbindWindow()
+        cameraGlRender.setPreview(null)
     }
 
     override fun onDestroy() {
@@ -72,6 +73,7 @@ class CameraFragment : Fragment(R.layout.lib_camera_fragment_camera) {
                 .build()
             check(provider != null && provider.hasCamera(selector)) { "Not found camera!" }
             provider.unbindAll()
+            cameraGlRender.setPreview(preview)
             preview.setSurfaceProvider(cameraGlRender)
             cameraViewModel.setupCamera(provider.bindToLifecycle(viewLifecycleOwner, selector, preview, *cases))
         }.invokeOnCompletion {
