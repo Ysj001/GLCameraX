@@ -2,6 +2,7 @@ package com.ysj.lib.camera.render
 
 import android.content.Context
 import android.graphics.SurfaceTexture
+import android.opengl.EGL14
 import android.opengl.GLES20
 import android.opengl.Matrix
 import android.os.Build
@@ -26,7 +27,8 @@ import java.io.Closeable
  * @author Ysj
  * Create time: 2022/10/28
  */
-class CameraGLEnv(private val context: Context) : SurfaceTexture.OnFrameAvailableListener, Closeable {
+class CameraGLEnv(private val context: Context) : SurfaceTexture.OnFrameAvailableListener,
+    Closeable {
 
     companion object {
         private const val TAG = "GLSurfaceProvider"
@@ -41,13 +43,19 @@ class CameraGLEnv(private val context: Context) : SurfaceTexture.OnFrameAvailabl
 
     private val glExecutor = ExecutorCompat.create(glThread.handler)
 
+    // ====================== execute by glExecutor ======================
+
     private val program = CommonOESProgram(context.assets)
     private var program2D = Common2DProgram(context.assets)
     private var glWindow: EGLWindow<Any>? = null
 
+    private var cameraInfo: CameraInfo? = null
+
     private var resolution: Size? = null
 
     private var renderManager: CameraRenderManager? = null
+
+    // ===================================================================
 
     fun onSurfaceRequested(cameraInfo: CameraInfo, request: SurfaceRequest, window: Any) {
         if (glThread.ending) {
@@ -62,10 +70,11 @@ class CameraGLEnv(private val context: Context) : SurfaceTexture.OnFrameAvailabl
         }
         val lensFacing = cameraInfo.lensFacing
         val degree = cameraInfo.sensorRotationDegrees
-        resolution = when (degree) {
+        this.resolution = when (degree) {
             90, 270 -> Size(cameraInfo.size.height, cameraInfo.size.width)
             else -> cameraInfo.size
         }
+        this.cameraInfo = cameraInfo
         // 矫正相机的 oes 纹理
         Matrix.setIdentityM(program.matrix, 0)
         if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
@@ -87,6 +96,7 @@ class CameraGLEnv(private val context: Context) : SurfaceTexture.OnFrameAvailabl
         request.provideSurface(output(cameraInfo.size), glExecutor) {
             Log.i(TAG, "Safe to release surface.")
         }
+        Log.i(TAG, "onSurfaceRequested.")
     }
 
     override fun onFrameAvailable(surfaceTexture: SurfaceTexture) {
@@ -146,8 +156,24 @@ class CameraGLEnv(private val context: Context) : SurfaceTexture.OnFrameAvailabl
 
     fun setRenderManager(manager: CameraRenderManager?) = glThread.exec {
         renderManager?.detach()
-        renderManager = manager
-        manager?.attach(it, glThread)
+        renderManager = manager ?: return@exec
+        val env = glThread.eglEnv
+        val window = glWindow
+        if (window == null) {
+            EGL14.eglMakeCurrent(
+                env.display,
+                EGL14.EGL_NO_SURFACE,
+                EGL14.EGL_NO_SURFACE,
+                env.context
+            )
+        } else {
+            window.selectCurrent(env)
+        }
+        manager.attach(env, glThread)
+        val cameraInfo = this.cameraInfo
+        if (cameraInfo != null) {
+            manager.onSurfaceRequest(cameraInfo)
+        }
     }
 
     private fun onGLThreadExited(env: EGLEnv?) {
@@ -172,8 +198,33 @@ class CameraGLEnv(private val context: Context) : SurfaceTexture.OnFrameAvailabl
 
     private fun bindWindow(env: EGLEnv, window: Any) {
         glWindow?.release(env)
-        glWindow = EGLWindow(window)
+        glWindow = MGLWindow(window)
         glWindow?.selectCurrent(env)
     }
 
+    private class MGLWindow(window: Any) : EGLWindow<Any>(window) {
+        override fun selectedNothing(env: EGLEnv) {
+            if (eglSurface == EGL14.EGL_NO_SURFACE) {
+                return
+            }
+            EGL14.eglMakeCurrent(
+                env.display,
+                EGL14.EGL_NO_SURFACE,
+                EGL14.EGL_NO_SURFACE,
+                env.context
+            )
+        }
+
+        override fun release(env: EGLEnv) {
+            EGL14.eglMakeCurrent(
+                env.display,
+                EGL14.EGL_NO_SURFACE,
+                EGL14.EGL_NO_SURFACE,
+                env.context
+            )
+            EGL14.eglDestroySurface(env.display, eglSurface)
+            eglSurface = EGL14.EGL_NO_SURFACE
+            window = null
+        }
+    }
 }
